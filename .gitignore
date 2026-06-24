@@ -1,7 +1,0 @@
-.DS_Store
-*.log
-tmp/
-dist/
-.env
-.env.*
-!.env.example
