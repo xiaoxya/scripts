@@ -1,0 +1,15 @@
+memory/
+*.log
+openclaw-workspace-state.json
+port_query.py
+port_query.sh
+python/
+setup-comfyui.sh
+word_to_md.py
+scripts/
+AGENTS.md
+HEARTBEAT.md
+IDENTITY.md
+SOUL.md
+TOOLS.md
+USER.md
