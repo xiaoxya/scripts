@@ -36,8 +36,8 @@
 const $ = API("qweather");
 
 // ============ 和风天气配置 ============
-const QW_KEY = $.read("key");
-const QW_LOCATION = $.read("location"); // 和风城市 ID，不设置则用经纬度自动定位
+const QW_KEY = "your-api-key-here"; // ← 替换为你的和风天气 API Key
+const QW_LOCATION = ""; // 和风城市 ID，不设置则自动定位（推荐留空）
 const QW_LANG = "zh";
 
 // ============ 定位（从系统天气请求中获取） ============
@@ -72,7 +72,7 @@ if (typeof $request !== "undefined") {
   // 定时任务
   !(async () => {
     if (!QW_KEY) {
-      $.notify("[和风天气]", "❌ 未设置 API Key", "请前往 https://dev.qweather.com/ 注册获取\n并在 box.js 中设置 key");
+      $.notify("[和风天气]", "❌ 未设置 API Key", "请前往 https://dev.qweather.com/ 注册获取\n并在脚本第 40 行填入 key");
       $.done();
       return;
     }
