@@ -1,0 +1,11 @@
+{
+ "theme": {
+  "file": [
+   "/ventoy/themes/theme-vfc-cn/theme.txt"
+  ],
+  "fonts": [
+   "/ventoy/themes/theme-vfc-cn/NotoSansMonoCJKsc-24.pf2"
+  ],
+  "gfxmode": "max"
+ }
+}
