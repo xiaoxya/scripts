@@ -1,218 +1,350 @@
 /**
- * 和风天气 v1.0
+ * 和风天气 v1.1
  * @author: mo (based on Peng-YM's 彩云天气)
  *
  * 和风天气 API: https://dev.qweather.com/
- * 注册获取 API Key (免费版)
  *
  * 功能：
- * √ 自动定位
- * √ 天气预警
- * √ 实时天气 + 24h 预报
- * √ 生活指数
+ * - 从系统天气请求中自动保存经纬度
+ * - 定时推送实时天气、24h 逐小时预报、天气预警、生活指数
  *
  * 配置：
- * 1️⃣ 配置 MITM + 重写
- *    Quantumult X:
- *    [MITM]
- *    hostname=weather-data.apple.com, api.weather.com
- *    [rewrite_local]
- *    https:\/\/((weather-data\.apple)|(api\.weather))\.com url script-request-header https://raw.githubusercontent.com/YOUR-USERNAME/qweather-weather.js
- *
- *    Surge:
- *    [MITM]
- *    hostname=weather-data.apple.com, api.weather.com
- *    [Script]
- *    type=http-request, pattern=https:\/\/((weather-data\.apple)|(api\.weather))\.com, script-path=qweather-weather.js, require-body=false
- *
- * 2️⃣ 打开手机定位服务 > 天气 > 允许访问位置
- * 3️⃣ 在 box.js 或本地存储中设置：
- *    key → 和风天气 API Key
- *    location → 和风城市 ID（可选，不设置则自动定位）
- * 4️⃣ 配置 cron 定时任务，如：10 8-22/2 * * *
+ * 1. 配置 MITM + 重写，拦截 weather-data.apple.com / api.weather.com
+ * 2. 打开手机定位服务 > 天气 > 允许访问位置
+ * 3. 在 BoxJs / 本地存储中设置 key，或直接修改 QW_KEY
+ * 4. 配置 cron 定时任务，如：10 8-22/2 * * *
  */
 
 /********************** SCRIPT START *********************************/
-const $ = API("qweather");
+const APP_NAME = "qweather";
+const $ = API(APP_NAME);
 
 // ============ 和风天气配置 ============
-const QW_KEY = "your-api-key-here"; // ← 替换为你的和风天气 API Key
-const QW_LOCATION = ""; // 和风城市 ID，不设置则自动定位（推荐留空）
-const QW_LANG = "zh";
+const QW_KEY = $.read("key") || "your-api-key-here";
+const QW_LOCATION_ID = $.read("locationId") || ""; // 和风城市 ID，可选；留空则用自动定位的经纬度反查
+const QW_LANG = $.read("lang") || "zh";
+const QW_INDICES_TYPE = $.read("indicesType") || "1,2,3,5";
 
-// ============ 定位（从系统天气请求中获取） ============
-let savedLocation = $.read("location"); // { latitude, longitude }
+const QW_API_BASE = "https://devapi.qweather.com/v7";
+const QW_GEO_BASE = "https://geoapi.qweather.com/v2";
+const NOTIFY_TITLE = "[和风天气]";
 
-if (typeof $request !== "undefined") {
-  const url = $request.url;
-  const res =
-    url.match(/weather\/.*?\/(.*)\/(.*)\?/) ||
-    url.match(/geocode\/([0-9.]*)\/([0-9.]*)\//) ||
-    url.match(/geocode=([0-9.]*),([0-9.]*)/) ||
-    url.match(/v2\/availability\/([0-9.]*)\/([0-9.]*)\//);
+main();
 
-  if (res === null) {
-    $.info(`❌ 无法从 URL 获取位置: ${url}`);
-    $.done({ body: $request.body });
-  } else {
-    savedLocation = {
-      latitude: res[1],
-      longitude: res[2],
-    };
-    if (!$.read("saved")) {
-      $.notify("[和风天气]", "", "🎉 获取定位成功");
-    }
-    $.write(res[1], "#latitude");
-    $.write(res[2], "#longitude");
-    $.write(savedLocation, "location");
-    $.write("1", "saved");
-    $.done({ body: $request.body });
+function main() {
+  if ($.env.isRequest) {
+    handleLocationRequest();
+    return;
   }
-} else {
-  // 定时任务
-  !(async () => {
-    if (!QW_KEY) {
-      $.notify("[和风天气]", "❌ 未设置 API Key", "请前往 https://dev.qweather.com/ 注册获取\n并在脚本第 40 行填入 key");
-      $.done();
-      return;
+
+  runTask()
+    .catch(error => {
+      $.error(error);
+      $.notify(NOTIFY_TITLE, "运行失败", error.message || String(error));
+    })
+    .finally(() => $.done());
+}
+
+// ============ 定位拦截 ============
+function handleLocationRequest() {
+  const location = parseLocationFromUrl($request.url);
+
+  if (!location) {
+    $.info(`无法从 URL 获取位置: ${$request.url}`);
+    $.done({ body: $request.body });
+    return;
+  }
+
+  saveLocation(location);
+  $.done({ body: $request.body });
+}
+
+function parseLocationFromUrl(url) {
+  const number = "(-?\\d+(?:\\.\\d+)?)";
+  const patterns = [
+    new RegExp(`weather\\/.*?\\/${number}\\/${number}\\?`),
+    new RegExp(`geocode\\/${number}\\/${number}\\/`),
+    new RegExp(`geocode=${number},${number}`),
+    new RegExp(`v2\\/availability\\/${number}\\/${number}\\/`),
+  ];
+
+  for (const pattern of patterns) {
+    const match = url.match(pattern);
+    if (match) {
+      return {
+        latitude: match[1],
+        longitude: match[2],
+      };
     }
-    if (!savedLocation) {
-      $.notify("[和风天气]", "❌ 未获取到定位", "请确保 MITM 重写配置正确\n并开启手机定位服务");
-      $.done();
-      return;
-    }
-    await run();
-    $.done();
-  })();
+  }
+
+  return null;
+}
+
+function saveLocation(location) {
+  const previous = $.read("location");
+  const shouldNotify = !$.read("saved");
+
+  $.write(location.latitude, "#latitude");
+  $.write(location.longitude, "#longitude");
+  $.write(location, "location");
+  $.write("1", "saved");
+
+  if (shouldNotify || !sameLocation(previous, location)) {
+    $.notify(NOTIFY_TITLE, "", `获取定位成功：${location.latitude}, ${location.longitude}`);
+  }
+}
+
+function sameLocation(left, right) {
+  return Boolean(
+    left &&
+    right &&
+    String(left.latitude) === String(right.latitude) &&
+    String(left.longitude) === String(right.longitude)
+  );
 }
 
 // ============ 主流程 ============
-async function run() {
-  const { latitude, longitude } = savedLocation;
+async function runTask() {
+  assertConfig();
 
-  // 1. 根据经纬度获取和风城市 ID
-  const { locationId, locationName } = await geocode(latitude, longitude);
+  const place = await resolvePlace();
+  const [now, forecast24h, alerts, indices] = await Promise.all([
+    getNow(place.id),
+    getForecast24h(place.id),
+    getAlerts(place.id),
+    getIndices(place.id),
+  ]);
 
-  // 2. 获取实时天气
-  const now = await getNow(locationId);
+  const body = buildNotify({ now, forecast24h, alerts, indices });
+  $.notify(NOTIFY_TITLE, place.name, body);
+}
 
-  // 3. 获取 24h 预报
-  const forecast24h = await getForecast24h(locationId);
+function assertConfig() {
+  if (!QW_KEY || QW_KEY === "your-api-key-here") {
+    throw new Error("未设置 API Key，请在 BoxJs / 本地存储写入 key，或直接修改脚本里的 QW_KEY。");
+  }
+}
 
-  // 4. 获取天气预警
-  const alerts = await getAlerts(locationId);
+async function resolvePlace() {
+  if (QW_LOCATION_ID) {
+    return {
+      id: QW_LOCATION_ID,
+      name: $.read("locationName") || QW_LOCATION_ID,
+    };
+  }
 
-  // 5. 获取生活指数
-  const indices = await getIndices(locationId);
+  const location = normalizeLocation($.read("location"));
+  if (!location) {
+    throw new Error("未获取到定位，请先打开系统天气 App，并确认 MITM 与重写配置已生效。");
+  }
 
-  // 6. 组装通知
-  let body = buildNotify(now, forecast24h, alerts, indices, locationName);
-  $.notify("[和风天气]", locationName, body);
+  return geocode(location);
+}
+
+function normalizeLocation(value) {
+  if (!value) return null;
+
+  if (typeof value === "string") {
+    try {
+      return normalizeLocation(JSON.parse(value));
+    } catch (_) {
+      return null;
+    }
+  }
+
+  if (value.latitude && value.longitude) {
+    return {
+      latitude: String(value.latitude),
+      longitude: String(value.longitude),
+    };
+  }
+
+  return null;
 }
 
 // ============ API 调用 ============
-const QW_BASE = "https://devapi.qweather.com/v7";
+async function qweatherGet(baseUrl, path, params) {
+  const url = buildUrl(`${baseUrl}${path}`, {
+    lang: QW_LANG,
+    key: QW_KEY,
+    ...params,
+  });
+  const response = await $.http.get({ url });
 
-async function getNow(id) {
-  const url = `${QW_BASE}/weather/now?location=${id}&lang=${QW_LANG}&key=${QW_KEY}`;
-  return $.http.get({ url })
-    .then(r => JSON.parse(r.body))
-    .then(d => {
-      if (d.code !== "200") throw new Error(`getNow 错误: ${d.code}`);
-      return d.now;
-    });
-}
-
-async function getForecast24h(id) {
-  const url = `${QW_BASE}/weather/24h?location=${id}&lang=${QW_LANG}&key=${QW_KEY}`;
-  return $.http.get({ url })
-    .then(r => JSON.parse(r.body))
-    .then(d => {
-      if (d.code !== "200") throw new Error(`getForecast 错误: ${d.code}`);
-      return d.forecast;
-    });
-}
-
-async function getAlerts(id) {
-  const url = `${QW_BASE}/weather/alert?location=${id}&lang=${QW_LANG}&key=${QW_KEY}`;
-  return $.http.get({ url })
-    .then(r => JSON.parse(r.body))
-    .then(d => {
-      if (d.code !== "200") return [];
-      return d.alert || [];
-    })
-    .catch(() => []);
-}
-
-async function getIndices(id) {
-  const url = `${QW_BASE}/indices/1d?type=1&location=${id}&lang=${QW_LANG}&key=${QW_KEY}`;
-  return $.http.get({ url })
-    .then(r => JSON.parse(r.body))
-    .then(d => {
-      if (d.code !== "200") return [];
-      return d.daily || [];
-    })
-    .catch(() => []);
-}
-
-async function geocode(lat, lon) {
-  // 先尝试用经纬度反向解析城市
-  const url = `https://geoapi.qweather.com/v2/city/geo?location=${lon},${lat}&key=${QW_KEY}`;
-  const d = await $.http.get({ url })
-    .then(r => JSON.parse(r.body));
-
-  if (d.code === "200" && d.location && d.location.length > 0) {
-    const loc = d.location[0];
-    return {
-      locationId: loc.id,
-      locationName: `${loc.name} ${loc.adm2 || ""}`.trim(),
-    };
+  if (response.statusCode && (response.statusCode < 200 || response.statusCode >= 300)) {
+    throw new Error(`${path} HTTP ${response.statusCode}：${redactUrl(url)}`);
   }
-  throw new Error(`geocode 错误: ${d.code}`);
+
+  const body = response.body || "";
+  if (!body.trim()) {
+    throw new Error(`${path} 返回空内容，HTTP ${response.statusCode || "unknown"}：${redactUrl(url)}`);
+  }
+
+  const data = parseJson(body, path);
+
+  if (data.code !== "200") {
+    throw new Error(`${path} 请求失败：${data.code}`);
+  }
+
+  return data;
+}
+
+async function getNow(locationId) {
+  const data = await qweatherGet(QW_API_BASE, "/weather/now", { location: locationId });
+  return data.now;
+}
+
+async function getForecast24h(locationId) {
+  const data = await qweatherGet(QW_API_BASE, "/weather/24h", { location: locationId });
+  return data.hourly || [];
+}
+
+async function getAlerts(locationId) {
+  try {
+    const data = await qweatherGet(QW_API_BASE, "/warning/now", { location: locationId });
+    return data.warning || [];
+  } catch (error) {
+    $.info(`天气预警获取失败，已跳过：${error.message || error}`);
+    return [];
+  }
+}
+
+async function getIndices(locationId) {
+  try {
+    const data = await qweatherGet(QW_API_BASE, "/indices/1d", {
+      type: QW_INDICES_TYPE,
+      location: locationId,
+    });
+    return data.daily || [];
+  } catch (error) {
+    $.info(`生活指数获取失败，已跳过：${error.message || error}`);
+    return [];
+  }
+}
+
+async function geocode(location) {
+  const data = await qweatherGet(QW_GEO_BASE, "/city/lookup", {
+    location: formatGeoLocation(location),
+  });
+
+  if (!data.location || data.location.length === 0) {
+    throw new Error("经纬度反查城市失败：无匹配城市。");
+  }
+
+  const city = data.location[0];
+  return {
+    id: city.id,
+    name: [city.name, city.adm2].filter(Boolean).join(" "),
+  };
+}
+
+function buildUrl(base, params) {
+  const query = Object.keys(params)
+    .filter(key => params[key] !== undefined && params[key] !== null && params[key] !== "")
+    .map(key => `${encodeURIComponent(key)}=${encodeURIComponent(params[key])}`)
+    .join("&");
+
+  return query ? `${base}?${query}` : base;
+}
+
+function redactUrl(url) {
+  return url.replace(/([?&]key=)[^&]*/g, "$1***");
+}
+
+function formatGeoLocation(location) {
+  const longitude = Number(location.longitude);
+  const latitude = Number(location.latitude);
+
+  if (!Number.isFinite(longitude) || !Number.isFinite(latitude)) {
+    throw new Error(`定位经纬度无效：${location.longitude}, ${location.latitude}`);
+  }
+
+  return `${longitude.toFixed(2)},${latitude.toFixed(2)}`;
+}
+
+function parseJson(body, label) {
+  try {
+    return JSON.parse(body);
+  } catch (error) {
+    throw new Error(`${label} 返回内容不是有效 JSON：${error.message}`);
+  }
 }
 
 // ============ 通知组装 ============
-function buildNotify(now, forecast, alerts, indices, locationName) {
-  let lines = [];
+function buildNotify({ now, forecast24h, alerts, indices }) {
+  const lines = [];
 
-  // 实时天气
-  const icon = weatherIcon(now.icon);
-  lines.push(`${icon} ${now.text}  ${now.temp}°C`);
-  lines.push(`体感 ${now.feelsLike}°C  |  湿度 ${now.humidity}%  |  风向 ${windDir(now.windDir)} ${now.windScale}级`);
-  lines.push(`气压 ${now.pressure}hPa  |  能见度 ${now.vis}km`);
+  lines.push(formatNow(now));
 
-  // 预警
-  if (alerts.length > 0) {
-    const alert = alerts[0];
-    lines.push(`\n⚠️ [预警] ${alert.title}`);
-    lines.push(`  ${alert.cate}  |  ${alert.startTime} 起`);
-    if (alert.endTime) lines.push(`  至 ${alert.endTime}`);
-    if (alert.content) lines.push(`  ${alert.content.substring(0, 60)}`);
+  const alertLines = formatAlerts(alerts);
+  if (alertLines.length > 0) {
+    lines.push("", ...alertLines);
   }
 
-  // 24h 预报（取接下来几个时段）
-  lines.push("\n📋 24h 预报：");
-  const showPoints = forecast.filter((f, i) => {
-    if (i === 0) return true;
-    const hour = parseInt(f.fxTime.split("T")[1].split(":")[0]);
-    return hour % 3 === 0 || i < 5;
-  }).slice(0, 6);
+  const forecastLines = formatForecast(forecast24h);
+  if (forecastLines.length > 0) {
+    lines.push("", "24h 预报：", ...forecastLines);
+  }
 
-  showPoints.forEach(f => {
-    const time = f.fxTime.split("T")[1].substring(0, 5);
-    const icon = weatherIcon(f.icon);
-    lines.push(`  ${time}  ${icon} ${f.tempMax}°/${f.tempMin}° ${f.text}`);
-  });
-
-  // 生活指数（取前 3 个）
-  if (indices.length > 0) {
-    lines.push("\n📌 生活指数：");
-    indices.slice(0, 4).forEach(idx => {
-      lines.push(`  ${idx.name}: ${idx.brief}`);
-    });
+  const indexLines = formatIndices(indices);
+  if (indexLines.length > 0) {
+    lines.push("", "生活指数：", ...indexLines);
   }
 
   return lines.join("\n");
+}
+
+function formatNow(now) {
+  return [
+    `${weatherIcon(now.icon)} ${now.text}  ${now.temp}°C`,
+    `体感 ${now.feelsLike}°C  |  湿度 ${now.humidity}%  |  ${windDir(now.windDir)} ${now.windScale}级`,
+    `气压 ${now.pressure}hPa  |  能见度 ${now.vis}km`,
+  ].join("\n");
+}
+
+function formatAlerts(alerts) {
+  if (!alerts || alerts.length === 0) return [];
+
+  const alert = alerts[0];
+  const lines = [`预警：${alert.title}`];
+
+  if (alert.typeName || alert.severityColor || alert.startTime) {
+    lines.push(`  ${[alert.typeName, alert.severityColor, alert.startTime && `${alert.startTime} 起`].filter(Boolean).join("  |  ")}`);
+  }
+  if (alert.endTime) lines.push(`  至 ${alert.endTime}`);
+  if (alert.text) lines.push(`  ${truncate(alert.text, 60)}`);
+
+  return lines;
+}
+
+function formatForecast(forecast) {
+  return selectForecastPoints(forecast).map(item => {
+    const time = item.fxTime.split("T")[1].substring(0, 5);
+    return `  ${time}  ${weatherIcon(item.icon)} ${item.temp}° ${item.text}`;
+  });
+}
+
+function selectForecastPoints(forecast) {
+  if (!Array.isArray(forecast)) return [];
+
+  return forecast
+    .filter((item, index) => {
+      if (index === 0) return true;
+      const hour = Number(item.fxTime.split("T")[1].split(":")[0]);
+      return hour % 3 === 0 || index < 5;
+    })
+    .slice(0, 6);
+}
+
+function formatIndices(indices) {
+  if (!Array.isArray(indices)) return [];
+
+  return indices.slice(0, 4).map(index => `  ${index.name}: ${index.category || truncate(index.text || "", 20)}`);
+}
+
+function truncate(text, maxLength) {
+  return text.length > maxLength ? `${text.substring(0, maxLength)}...` : text;
 }
 
 // ============ 工具函数 ============
@@ -244,9 +376,301 @@ function windDir(dir) {
   return dirs[dir] || dir;
 }
 
-// prettier-ignore
-/*********************************** API (Chopper) *************************************/
-function ENV() { const e = "undefined" != typeof $task, t = "undefined" != typeof $loon, s = "undefined" != typeof $httpClient && !t, i = "function" == typeof require && "undefined" != typeof $jsbox; return { isQX: e, isLoon: t, isSurge: s, isNode: "function" == typeof require && !i, isJSBox: i, isRequest: "undefined" != typeof $request, isScriptable: "undefined" != typeof importModule } }
-function HTTP(e = { baseURL: "" }) { const { isQX: t, isLoon: s, isSurge: i, isNode: o, isJSBox: r, isScriptable: u } = ENV(); const a = /https?:\/\/(www\.)?[-a-zA-Z0-9@:%._\+~#=]{1,256}\.[a-zA-Z0-9()]{1,6}\b([-a-zA-Z0-9()@:%_\+.~#?&\/\/=]*)/; const c = {}; return ["GET", "POST", "PUT", "DELETE", "HEAD", "OPTIONS", "PATCH"].forEach(l => c[l.toLowerCase()] = (function(l, a) { a = "string" == typeof a ? { url: a } : a; const c = e.baseURL; c && !a.url.match(a) && (a.url = c + a.url); const f = { ...e, ...a }; let d; if (t) d = $task.fetch({ method: l, ...a }); else if (s || i || o) d = new Promise((e, t) => { (o ? require("request") : $httpClient)[l.toLowerCase()](a, (s, i, n) => { s ? t(s) : e({ statusCode: i.status || i.statusCode, headers: i.headers, body: n }) }) }); else if (u) { const e = new Request(a.url); e.method = l, e.headers = a.headers, e.body = a.body, d = new Promise((t, s) => { e.loadString().then(s => { t({ statusCode: e.response.statusCode, headers: e.response.headers, body: s }) }).catch(e => s(e)) }) } return d })(l, a))), c }
-function API(e = "untitled", t = !1) { const { isQX: s, isLoon: i, isSurge: n, isNode: o, isJSBox: r, isScriptable: u } = ENV(); return new class { constructor(e, t) { this.name = e, this.debug = t, this.http = HTTP(), this.env = ENV(), this.node = (() => { if (o) { return { fs: require("fs") } } return null })(), this.initCache(); Promise.prototype.delay = function (e) { return this.then(function (t) { return ((e, t) => new Promise(function (s) { setTimeout(s.bind(null, t), e) }))(e, t) }) } } initCache() { if (s && (this.cache = JSON.parse($prefs.valueForKey(this.name) || "{}")), (i || n) && (this.cache = JSON.parse($persistentStore.read(this.name) || "{}")), o) { let e = "root.json"; this.node.fs.existsSync(e) || this.node.fs.writeFileSync(e, JSON.stringify({}), { flag: "wx" }, e => console.log(e)), this.root = {}, e = `${this.name}.json`, this.node.fs.existsSync(e) ? this.cache = JSON.parse(this.node.fs.readFileSync(`${this.name}.json`)) : (this.node.fs.writeFileSync(e, JSON.stringify({}), { flag: "wx" }, e => console.log(e)), this.cache = {}) } } persistCache() { const e = JSON.stringify(this.cache, null, 2); s && $prefs.setValueForKey(e, this.name), (i || n) && $persistentStore.write(e, this.name), o && (this.node.fs.writeFileSync(`${this.name}.json`, e, { flag: "w" }, e => console.log(e)), this.node.fs.writeFileSync("root.json", JSON.stringify(this.root, null, 2), { flag: "w" }, e => console.log(e))) } write(e, t) { if (this.log(`SET ${t}`), -1 !== t.indexOf("#")) { if (t = t.substr(1), n || i) return $persistentStore.write(e, t); if (s) return $prefs.setValueForKey(e, t); o && (this.root[t] = e) } else this.cache[t] = e; this.persistCache() } read(e) { return this.log(`READ ${e}`), -1 === e.indexOf("#") ? this.cache[e] : (e = e.substr(1), n || i ? $persistentStore.read(e) : s ? $prefs.valueForKey(e) : o ? this.root[e] : void 0) } delete(e) { if (this.log(`DELETE ${e}`), -1 !== e.indexOf("#")) { if (e = e.substr(1), n || i) return $persistentStore.write(null, e); if (s) return $prefs.removeValueForKey(e); o && delete this.root[e] } else delete this.cache[e]; this.persistCache() } notify(e, t = "", l = "", h = {}) { const a = h["open-url"], c = h["media-url"]; if (s && $notify(e, t, l, h), n && $notification.post(e, t, l + `${c ? "\n多媒体:" + c : ""}`, { url: a }), i) { let s = {}; a && (s.openUrl = a), c && (s.mediaUrl = c), "{}" === JSON.stringify(s) ? $notification.post(e, t, l) : $notification.post(e, t, l, s) } if (o || u) { const s = l + (a ? `\n点击跳转: ${a}` : "") + (c ? `\n多媒体: ${c}` : ""); if (r) { require("push").schedule({ title: e, body: (t ? t + "\n" : "") + s }) } else console.log(`${e}\n${t}\n${s}\n\n`) } } log(e) { this.debug && console.log(`[${this.name}] LOG: ${this.stringify(e)}`) } info(e) { console.log(`[${this.name}] INFO: ${this.stringify(e)}`) } error(e) { console.log(`[${this.name}] ERROR: ${this.stringify(e)}`) } wait(e) { return new Promise(t => setTimeout(t, e)) } done(e = {}) { s || i || n ? $done(e) : o && !r && "undefined" != typeof $context && ($context.headers = e.headers, $context.statusCode = e.statusCode, $context.body = e.body) } stringify(e) { if ("string" == typeof e || e instanceof String) return e; try { return JSON.stringify(e, null, 2) } catch (e) { return "[object Object]" } } }(e, t) }
+/*********************************** API *************************************/
+function ENV() {
+  const isQX = typeof $task !== "undefined";
+  const isLoon = typeof $loon !== "undefined";
+  const isSurge = typeof $httpClient !== "undefined" && !isLoon;
+  const isJSBox = typeof require === "function" && typeof $jsbox !== "undefined";
+  const isNode = typeof require === "function" && !isJSBox;
+
+  return {
+    isQX,
+    isLoon,
+    isSurge,
+    isNode,
+    isJSBox,
+    isRequest: typeof $request !== "undefined",
+    isScriptable: typeof importModule !== "undefined",
+  };
+}
+
+function HTTP(options = { baseURL: "" }) {
+  const env = ENV();
+  const client = {};
+  const methods = ["GET", "POST", "PUT", "DELETE", "HEAD", "OPTIONS", "PATCH"];
+
+  methods.forEach(method => {
+    client[method.toLowerCase()] = requestOptions => request(method, requestOptions);
+  });
+
+  function request(method, requestOptions) {
+    const normalized = normalizeRequest(options, requestOptions);
+
+    if (env.isQX) {
+      return $task.fetch({ method, ...normalized });
+    }
+
+    if (env.isSurge || env.isLoon) {
+      return requestWithHttpClient(method, normalized);
+    }
+
+    if (env.isScriptable) {
+      return requestWithScriptable(method, normalized);
+    }
+
+    if (env.isNode) {
+      return requestWithNode(method, normalized);
+    }
+
+    return Promise.reject(new Error("当前环境不支持 HTTP 请求。"));
+  }
+
+  return client;
+}
+
+function normalizeRequest(defaults, requestOptions) {
+  const options = typeof requestOptions === "string" ? { url: requestOptions } : { ...requestOptions };
+
+  if (defaults.baseURL && !/^https?:\/\//.test(options.url)) {
+    options.url = defaults.baseURL + options.url;
+  }
+
+  const { baseURL: _baseURL, ...requestDefaults } = defaults;
+  return { ...requestDefaults, ...options };
+}
+
+function requestWithHttpClient(method, options) {
+  return new Promise((resolve, reject) => {
+    $httpClient[method.toLowerCase()](options, (error, response, body) => {
+      if (error) {
+        reject(error);
+        return;
+      }
+
+      resolve({
+        statusCode: response.status || response.statusCode,
+        headers: response.headers,
+        body,
+      });
+    });
+  });
+}
+
+function requestWithScriptable(method, options) {
+  const request = new Request(options.url);
+  request.method = method;
+  request.headers = options.headers;
+  request.body = options.body;
+
+  return request.loadString().then(body => ({
+    statusCode: request.response.statusCode,
+    headers: request.response.headers,
+    body,
+  }));
+}
+
+async function requestWithNode(method, options) {
+  if (typeof fetch !== "function") {
+    throw new Error("本地 Node 环境需要 Node 18+，或提供全局 fetch。");
+  }
+
+  const response = await fetch(options.url, {
+    method,
+    headers: options.headers,
+    body: options.body,
+  });
+
+  return {
+    statusCode: response.status,
+    headers: Object.fromEntries(response.headers.entries()),
+    body: await response.text(),
+  };
+}
+
+function API(name = "untitled", debug = false) {
+  const env = ENV();
+
+  return new class {
+    constructor() {
+      this.name = name;
+      this.debug = debug;
+      this.env = env;
+      this.http = HTTP();
+      this.node = env.isNode ? { fs: require("fs") } : null;
+      this.root = {};
+      this.cache = {};
+      this.initCache();
+    }
+
+    initCache() {
+      if (env.isQX) {
+        this.cache = safeJsonParse($prefs.valueForKey(this.name), {});
+        return;
+      }
+
+      if (env.isLoon || env.isSurge) {
+        this.cache = safeJsonParse($persistentStore.read(this.name), {});
+        return;
+      }
+
+      if (env.isNode) {
+        this.root = this.readJsonFile("root.json");
+        this.cache = this.readJsonFile(`${this.name}.json`);
+      }
+    }
+
+    readJsonFile(file) {
+      if (!this.node.fs.existsSync(file)) {
+        this.node.fs.writeFileSync(file, JSON.stringify({}, null, 2), { flag: "wx" });
+        return {};
+      }
+
+      return safeJsonParse(this.node.fs.readFileSync(file, "utf8"), {});
+    }
+
+    persistCache() {
+      const body = JSON.stringify(this.cache, null, 2);
+
+      if (env.isQX) {
+        $prefs.setValueForKey(body, this.name);
+      } else if (env.isLoon || env.isSurge) {
+        $persistentStore.write(body, this.name);
+      } else if (env.isNode) {
+        this.node.fs.writeFileSync(`${this.name}.json`, body);
+        this.node.fs.writeFileSync("root.json", JSON.stringify(this.root, null, 2));
+      }
+    }
+
+    write(value, key) {
+      this.log(`SET ${key}`);
+
+      if (key.indexOf("#") !== -1) {
+        return this.writeRoot(key.substring(1), value);
+      }
+
+      this.cache[key] = value;
+      this.persistCache();
+      return true;
+    }
+
+    writeRoot(key, value) {
+      if (env.isLoon || env.isSurge) return $persistentStore.write(value, key);
+      if (env.isQX) return $prefs.setValueForKey(value, key);
+
+      if (env.isNode) {
+        this.root[key] = value;
+        this.persistCache();
+        return true;
+      }
+
+      return false;
+    }
+
+    read(key) {
+      this.log(`READ ${key}`);
+
+      if (key.indexOf("#") !== -1) {
+        return this.readRoot(key.substring(1));
+      }
+
+      return this.cache[key];
+    }
+
+    readRoot(key) {
+      if (env.isLoon || env.isSurge) return $persistentStore.read(key);
+      if (env.isQX) return $prefs.valueForKey(key);
+      if (env.isNode) return this.root[key];
+      return undefined;
+    }
+
+    delete(key) {
+      this.log(`DELETE ${key}`);
+
+      if (key.indexOf("#") !== -1) {
+        return this.deleteRoot(key.substring(1));
+      }
+
+      delete this.cache[key];
+      this.persistCache();
+      return true;
+    }
+
+    deleteRoot(key) {
+      if (env.isLoon || env.isSurge) return $persistentStore.write(null, key);
+      if (env.isQX) return $prefs.removeValueForKey(key);
+
+      if (env.isNode) {
+        delete this.root[key];
+        this.persistCache();
+        return true;
+      }
+
+      return false;
+    }
+
+    notify(title, subtitle = "", body = "", options = {}) {
+      const openUrl = options["open-url"];
+      const mediaUrl = options["media-url"];
+
+      if (env.isQX) {
+        $notify(title, subtitle, body, options);
+      } else if (env.isSurge) {
+        $notification.post(title, subtitle, body + (mediaUrl ? `\n多媒体:${mediaUrl}` : ""), { url: openUrl });
+      } else if (env.isLoon) {
+        const loonOptions = {};
+        if (openUrl) loonOptions.openUrl = openUrl;
+        if (mediaUrl) loonOptions.mediaUrl = mediaUrl;
+        $notification.post(title, subtitle, body, loonOptions);
+      } else if (env.isJSBox) {
+        require("push").schedule({ title, body: (subtitle ? `${subtitle}\n` : "") + body });
+      } else {
+        console.log(`${title}\n${subtitle}\n${body}\n`);
+      }
+    }
+
+    log(message) {
+      if (this.debug) console.log(`[${this.name}] LOG: ${this.stringify(message)}`);
+    }
+
+    info(message) {
+      console.log(`[${this.name}] INFO: ${this.stringify(message)}`);
+    }
+
+    error(message) {
+      console.log(`[${this.name}] ERROR: ${this.stringify(message)}`);
+    }
+
+    done(value = {}) {
+      if (env.isQX || env.isLoon || env.isSurge) {
+        $done(value);
+      } else if (env.isNode && typeof $context !== "undefined") {
+        $context.headers = value.headers;
+        $context.statusCode = value.statusCode;
+        $context.body = value.body;
+      }
+    }
+
+    stringify(value) {
+      if (value instanceof Error) return value.stack || value.message;
+      if (typeof value === "string" || value instanceof String) return value;
+      try {
+        return JSON.stringify(value, null, 2);
+      } catch (_) {
+        return "[object Object]";
+      }
+    }
+  }();
+}
+
+function safeJsonParse(value, fallback) {
+  if (!value) return fallback;
+
+  try {
+    return JSON.parse(value);
+  } catch (_) {
+    return fallback;
+  }
+}
+
 /*****************************************************************************/
