@@ -12,7 +12,8 @@
  * 1. 配置 MITM + 重写，拦截 weather-data.apple.com / api.weather.com
  * 2. 打开手机定位服务 > 天气 > 允许访问位置
  * 3. 在 BoxJs / 本地存储中设置 key，或直接修改 QW_KEY
- * 4. 配置 cron 定时任务，如：10 8-22/2 * * *
+ * 4. 如需 Bark 推送，在本地存储中设置 barkKey，可选设置 barkServer
+ * 5. 配置 cron 定时任务，如：10 8-22/2 * * *
  */
 
 /********************** SCRIPT START *********************************/
@@ -24,6 +25,11 @@ const QW_KEY = $.read("key") || "your-api-key-here";
 const QW_LOCATION_ID = $.read("locationId") || ""; // 和风城市 ID，可选；留空则用自动定位的经纬度反查
 const QW_LANG = $.read("lang") || "zh";
 const QW_INDICES_TYPE = $.read("indicesType") || "1,2,3,5";
+const BARK_KEY = $.read("barkKey") || "";
+const BARK_SERVER = trimTrailingSlash($.read("barkServer") || "https://api.day.app");
+const BARK_GROUP = $.read("barkGroup") || "和风天气";
+const BARK_ICON = $.read("barkIcon") || "";
+const BARK_SOUND = $.read("barkSound") || "";
 
 const QW_API_BASE = "https://devapi.qweather.com/v7";
 const QW_GEO_BASE = "https://geoapi.qweather.com/v2";
@@ -38,9 +44,9 @@ function main() {
   }
 
   runTask()
-    .catch(error => {
+    .catch(async error => {
       $.error(error);
-      $.notify(NOTIFY_TITLE, "运行失败", error.message || String(error));
+      await sendErrorNotify(error);
     })
     .finally(() => $.done());
 }
@@ -116,8 +122,8 @@ async function runTask() {
     getIndices(place.id),
   ]);
 
-  const body = buildNotify({ now, forecast24h, alerts, indices });
-  $.notify(NOTIFY_TITLE, place.name, body);
+  const weather = { place, now, forecast24h, alerts, indices };
+  await sendWeatherNotify(weather);
 }
 
 function assertConfig() {
@@ -271,6 +277,64 @@ function parseJson(body, label) {
   }
 }
 
+// ============ 推送 ============
+async function sendWeatherNotify(weather) {
+  if (BARK_KEY) {
+    await sendBarkNotify({
+      title: `${weather.place.name}天气`,
+      body: buildBarkBody(weather),
+    });
+    return;
+  }
+
+  $.notify(NOTIFY_TITLE, weather.place.name, buildNotify(weather));
+}
+
+async function sendErrorNotify(error) {
+  const message = error.message || String(error);
+
+  if (BARK_KEY) {
+    try {
+      await sendBarkNotify({
+        title: "和风天气运行失败",
+        body: `❌ 运行失败\n\n${message}`,
+      });
+      return;
+    } catch (pushError) {
+      $.error(pushError);
+    }
+  }
+
+  $.notify(NOTIFY_TITLE, "运行失败", message);
+}
+
+async function sendBarkNotify({ title, body }) {
+  const payload = {
+    title,
+    body,
+    group: BARK_GROUP,
+    isArchive: "1",
+  };
+
+  if (BARK_ICON) payload.icon = BARK_ICON;
+  if (BARK_SOUND) payload.sound = BARK_SOUND;
+
+  const response = await $.http.post({
+    url: `${BARK_SERVER}/${encodeURIComponent(BARK_KEY)}`,
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify(payload),
+  });
+
+  if (response.statusCode && (response.statusCode < 200 || response.statusCode >= 300)) {
+    throw new Error(`Bark 推送失败，HTTP ${response.statusCode}`);
+  }
+
+  const data = parseJson(response.body || "{}", "Bark");
+  if (data.code && data.code !== 200) {
+    throw new Error(`Bark 推送失败：${data.message || data.code}`);
+  }
+}
+
 // ============ 通知组装 ============
 function buildNotify({ now, forecast24h, alerts, indices }) {
   const lines = [];
@@ -290,6 +354,39 @@ function buildNotify({ now, forecast24h, alerts, indices }) {
   const indexLines = formatIndices(indices);
   if (indexLines.length > 0) {
     lines.push("", "生活指数：", ...indexLines);
+  }
+
+  return lines.join("\n");
+}
+
+function buildBarkBody({ now, forecast24h, alerts, indices }) {
+  const forecastLines = formatBarkForecast(forecast24h);
+  const alertLines = formatBarkAlerts(alerts);
+  const indexLines = formatBarkIndices(indices);
+  const lines = [
+    `${weatherIcon(now.icon)} ${now.text}  ${now.temp}°C`,
+    `🌡️ 体感 ${now.feelsLike}°C`,
+    "",
+    `💧 湿度 ${now.humidity}%`,
+    `🌬️ ${windDir(now.windDir)} ${now.windScale}级`,
+    `🧭 气压 ${now.pressure}hPa`,
+    `👀 能见度 ${now.vis}km`,
+  ];
+
+  if (alertLines.length > 0) {
+    lines.push("", "⚠️ 天气预警", ...alertLines);
+  }
+
+  if (forecastLines.length > 0) {
+    lines.push("", "🕒 未来 24 小时", ...forecastLines);
+  }
+
+  if (indexLines.length > 0) {
+    lines.push("", "🧭 生活指数", ...indexLines);
+  }
+
+  if (now.obsTime) {
+    lines.push("", `📡 更新时间 ${formatDateTime(now.obsTime)}`);
   }
 
   return lines.join("\n");
@@ -318,10 +415,32 @@ function formatAlerts(alerts) {
   return lines;
 }
 
+function formatBarkAlerts(alerts) {
+  if (!alerts || alerts.length === 0) return [];
+
+  return alerts.slice(0, 2).flatMap(alert => {
+    const meta = [alert.typeName, formatSeverity(alert.severityColor), alert.startTime && `${formatDateTime(alert.startTime)} 起`]
+      .filter(Boolean)
+      .join(" · ");
+    const lines = [`• ${alert.title}`];
+    if (meta) lines.push(`  ${meta}`);
+    if (alert.text) lines.push(`  ${truncate(alert.text, 100)}`);
+    return lines;
+  });
+}
+
 function formatForecast(forecast) {
   return selectForecastPoints(forecast).map(item => {
     const time = item.fxTime.split("T")[1].substring(0, 5);
     return `  ${time}  ${weatherIcon(item.icon)} ${item.temp}° ${item.text}`;
+  });
+}
+
+function formatBarkForecast(forecast) {
+  return selectForecastPoints(forecast).map(item => {
+    const time = item.fxTime.split("T")[1].substring(0, 5);
+    const rain = item.pop ? ` · 降水 ${item.pop}%` : "";
+    return `• ${time}  ${weatherIcon(item.icon)} ${item.temp}° ${item.text}${rain}`;
   });
 }
 
@@ -343,8 +462,49 @@ function formatIndices(indices) {
   return indices.slice(0, 4).map(index => `  ${index.name}: ${index.category || truncate(index.text || "", 20)}`);
 }
 
+function formatBarkIndices(indices) {
+  if (!Array.isArray(indices)) return [];
+
+  return indices.slice(0, 4).map(index => {
+    const value = index.category || truncate(index.text || "", 20);
+    return `• ${indexIcon(index.name)} ${index.name}：${value}`;
+  });
+}
+
 function truncate(text, maxLength) {
   return text.length > maxLength ? `${text.substring(0, maxLength)}...` : text;
+}
+
+function trimTrailingSlash(value) {
+  return String(value || "").replace(/\/+$/, "");
+}
+
+function formatDateTime(value) {
+  return String(value || "")
+    .replace("T", " ")
+    .replace(/\+\d{2}:\d{2}$/, "")
+    .replace(/:\d{2}$/, "");
+}
+
+function formatSeverity(color) {
+  const map = {
+    Red: "🔴 红色",
+    Orange: "🟠 橙色",
+    Yellow: "🟡 黄色",
+    Blue: "🔵 蓝色",
+    White: "⚪ 白色",
+  };
+  return map[color] || color;
+}
+
+function indexIcon(name) {
+  if (name.indexOf("运动") !== -1) return "🏃";
+  if (name.indexOf("洗车") !== -1) return "🚗";
+  if (name.indexOf("穿衣") !== -1) return "👕";
+  if (name.indexOf("紫外") !== -1) return "☀️";
+  if (name.indexOf("感冒") !== -1) return "🤧";
+  if (name.indexOf("空气") !== -1) return "🌫️";
+  return "📌";
 }
 
 // ============ 工具函数 ============
