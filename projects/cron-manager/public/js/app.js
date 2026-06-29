@@ -86,6 +86,10 @@ function renderTasks() {
         <div class="output-body hidden" id="output-${t.id}">${esc(t.lastOutput)}</div>
       </div>` : ''}
       <div class="task-actions">
+        <button class="btn btn-sm btn-run" onclick="runTask('${t.id}')" id="run-btn-${t.id}">
+          <svg width="12" height="12" viewBox="0 0 24 24" fill="currentColor"><polygon points="5 3 19 12 5 21 5 3"/></svg>
+          立即执行
+        </button>
         <button class="btn btn-sm btn-edit" onclick="editTask('${t.id}')">编辑</button>
         <button class="btn btn-sm ${t.enabled ? 'btn-toggle-active' : 'btn-toggle-inactive'}" onclick="toggleTask('${t.id}')">
           ${t.enabled ? '暂停' : '启用'}
@@ -184,6 +188,36 @@ async function toggleTask(id) {
     console.error('Failed to toggle:', err);
     showToast('操作失败');
   }
+}
+
+async function runTask(id) {
+  const btn = document.getElementById('run-btn-' + id);
+  if (!btn) return;
+
+  btn.disabled = true;
+  btn.innerHTML = '<span class="spinner"></span> 执行中...';
+
+  try {
+    const res = await fetch(`/api/tasks/${id}/run`, { method: 'POST' });
+    const result = await res.json();
+
+    if (result.success) {
+      const status = result.exitCode === 0 ? '✅ 执行成功' : '❌ 执行失败';
+      showToast(`${status} (${result.duration})`);
+    } else {
+      showToast(result.error || '执行失败');
+    }
+  } catch (err) {
+    console.error('Failed to run task:', err);
+    showToast('执行失败');
+  }
+
+  btn.disabled = false;
+  btn.innerHTML = `
+    <svg width="12" height="12" viewBox="0 0 24 24" fill="currentColor"><polygon points="5 3 19 12 5 21 5 3"/></svg>
+    立即执行
+  `;
+  loadTasks();
 }
 
 async function deleteTask(id) {
