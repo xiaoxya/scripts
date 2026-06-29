@@ -1,0 +1,153 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>Cron Manager</title>
+  <link rel="stylesheet" href="/css/style.css">
+  <link rel="icon" href="data:image/svg+xml,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 100 100'><text y='.9em' font-size='90'>⏰</text></svg>">
+</head>
+<body>
+  <!-- Animated background -->
+  <div class="bg-grid"></div>
+  <div class="bg-glow bg-glow-1"></div>
+  <div class="bg-glow bg-glow-2"></div>
+
+  <div class="app">
+    <!-- Header -->
+    <header class="header">
+      <div class="header-left">
+        <div class="logo">
+          <span class="logo-icon">⏰</span>
+          <div class="logo-text">
+            <h1>Cron Manager</h1>
+            <span class="subtitle">定时任务管理平台</span>
+          </div>
+        </div>
+      </div>
+      <div class="header-right">
+        <div class="server-status" id="serverStatus">
+          <span class="status-dot"></span>
+          <span>运行中</span>
+        </div>
+        <button class="btn btn-icon" onclick="loadTasks()" title="刷新">
+          <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M21.5 2v6h-6M2.5 22v-6h6M2 11.5a10 10 0 0 1 18.8-4.3M22 12.5a10 10 0 0 1-18.8 4.3"/></svg>
+        </button>
+      </div>
+    </header>
+
+    <!-- Stats -->
+    <div class="stats-grid" id="statsGrid">
+      <div class="stat-card stat-total">
+        <div class="stat-icon">📋</div>
+        <div class="stat-info">
+          <span class="stat-value" id="statTotal">0</span>
+          <span class="stat-label">总任务</span>
+        </div>
+      </div>
+      <div class="stat-card stat-active">
+        <div class="stat-icon">🟢</div>
+        <div class="stat-info">
+          <span class="stat-value" id="statActive">0</span>
+          <span class="stat-label">运行中</span>
+        </div>
+      </div>
+      <div class="stat-card stat-paused">
+        <div class="stat-icon">⏸️</div>
+        <div class="stat-info">
+          <span class="stat-value" id="statPaused">0</span>
+          <span class="stat-label">已暂停</span>
+        </div>
+      </div>
+      <div class="stat-card stat-commands">
+        <div class="stat-icon">💻</div>
+        <div class="stat-info">
+          <span class="stat-value" id="statCommands">0</span>
+          <span class="stat-label">执行命令</span>
+        </div>
+      </div>
+    </div>
+
+    <!-- Task List -->
+    <section class="task-section">
+      <div class="section-header">
+        <h2>任务列表</h2>
+        <button class="btn btn-primary" onclick="openModal()">
+          <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5"><line x1="12" y1="5" x2="12" y2="19"/><line x1="5" y1="12" x2="19" y2="12"/></svg>
+          新建任务
+        </button>
+      </div>
+
+      <div id="taskList" class="task-list">
+        <div class="empty-state">
+          <div class="empty-icon">
+            <svg width="64" height="64" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1"><circle cx="12" cy="12" r="10"/><polyline points="12 6 12 12 16 14"/></svg>
+          </div>
+          <p class="empty-title">暂无定时任务</p>
+          <p class="empty-desc">点击上方"新建任务"按钮，添加你的第一个定时任务</p>
+        </div>
+      </div>
+    </section>
+  </div>
+
+  <!-- Modal -->
+  <div id="modal" class="modal hidden">
+    <div class="modal-backdrop" onclick="closeModal()"></div>
+    <div class="modal-content">
+      <div class="modal-header">
+        <h2 id="modalTitle">新建任务</h2>
+        <button class="close-btn" onclick="closeModal()">
+          <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><line x1="18" y1="6" x2="6" y2="18"/><line x1="6" y1="6" x2="18" y2="18"/></svg>
+        </button>
+      </div>
+      <form id="taskForm" onsubmit="handleSubmit(event)">
+        <input type="hidden" id="taskId">
+        <div class="form-group">
+          <label for="taskName">
+            <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M20.59 13.41l-7.17 7.17a2 2 0 0 1-2.83 0L2 12V2h10l8.59 8.59a2 2 0 0 1 0 2.82z"/><line x1="7" y1="7" x2="7.01" y2="7"/></svg>
+            任务名称
+          </label>
+          <input type="text" id="taskName" required placeholder="例如：每日备份数据库">
+        </div>
+        <div class="form-group">
+          <label for="taskSchedule">
+            <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><circle cx="12" cy="12" r="10"/><polyline points="12 6 12 12 16 14"/></svg>
+            Cron 表达式
+          </label>
+          <input type="text" id="taskSchedule" required placeholder="0 2 * * *" autocomplete="off">
+          <div class="cron-hints">
+            <button type="button" class="cron-hint" onclick="setCron('* * * * *')">每分钟</button>
+            <button type="button" class="cron-hint" onclick="setCron('0 * * * *')">每小时</button>
+            <button type="button" class="cron-hint" onclick="setCron('0 2 * * *')">每天2点</button>
+            <button type="button" class="cron-hint" onclick="setCron('0 9 * * 1')">每周一</button>
+            <button type="button" class="cron-hint" onclick="setCron('0 0 1 * *')">每月1号</button>
+          </div>
+        </div>
+        <div class="form-group">
+          <label for="taskCommand">
+            <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><polyline points="4 17 10 11 4 5"/><line x1="12" y1="19" x2="20" y2="19"/></svg>
+            执行命令
+          </label>
+          <input type="text" id="taskCommand" required placeholder="node /path/to/script.js">
+        </div>
+        <div class="form-group checkbox-group">
+          <label class="toggle-label">
+            <input type="checkbox" id="taskEnabled" checked>
+            <span class="toggle-slider"></span>
+            <span>创建后立即启用</span>
+          </label>
+        </div>
+        <div class="form-actions">
+          <button type="button" class="btn btn-ghost" onclick="closeModal()">取消</button>
+          <button type="submit" class="btn btn-primary" id="submitBtn">创建任务</button>
+        </div>
+      </form>
+    </div>
+  </div>
+
+  <!-- Toast -->
+  <div id="toast" class="toast hidden"></div>
+
+  <script src="/js/app.js"></script>
+</body>
+</html>
