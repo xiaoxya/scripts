@@ -1,0 +1,16 @@
+{
+  "name": "cron-manager",
+  "version": "1.0.0",
+  "description": "Node.js 定时任务 Web 管理系统",
+  "main": "server.js",
+  "scripts": {
+    "start": "node server.js",
+    "dev": "node --watch server.js"
+  },
+  "keywords": ["cron", "scheduler", "task-manager"],
+  "license": "MIT",
+  "dependencies": {
+    "express": "^4.21.0",
+    "node-cron": "^3.0.3"
+  }
+}
