@@ -85,6 +85,46 @@ function runCronTask(taskId) {
   activeJobs.set(taskId, job);
 }
 
+// Execute a task manually
+async function executeTask(taskId) {
+  const tasks = readTasks();
+  const task = tasks.find(t => t.id === taskId);
+  if (!task) return { success: false, error: 'Task not found' };
+
+  const startTime = new Date();
+  let output = '';
+  let error = '';
+  let exitCode = 0;
+
+  try {
+    const { stdout, stderr } = await execAsync(task.command, {
+      timeout: 3600000,
+      maxBuffer: 1024 * 1024 * 10
+    });
+    output = stdout;
+    error = stderr;
+    exitCode = 0;
+  } catch (e) {
+    output = e.stdout || '';
+    error = e.stderr || e.message || 'Unknown error';
+    exitCode = e.exitCode || 1;
+  }
+
+  const combinedOutput = (output + '\n' + error).trim().slice(0, 2000);
+  const allTasks = readTasks();
+  const idx = allTasks.findIndex(t => t.id === taskId);
+  if (idx !== -1) {
+    allTasks[idx].lastRun = startTime.toISOString();
+    allTasks[idx].lastOutput = exitCode === 0 ? combinedOutput : `[exit ${exitCode}] ${combinedOutput}`;
+    allTasks[idx].runCount = (allTasks[idx].runCount || 0) + 1;
+    allTasks[idx].lastExitCode = exitCode;
+    writeTasks(allTasks);
+  }
+
+  const duration = `${((new Date() - startTime) / 1000).toFixed(1)}s`;
+  return { success: true, exitCode, output: combinedOutput, duration };
+}
+
 // Routes
 app.get('/api/tasks', (req, res) => {
   const tasks = readTasks();
@@ -142,6 +182,12 @@ app.put('/api/tasks/:id', (req, res) => {
 
   writeTasks(tasks);
   res.json(tasks[idx]);
+});
+
+app.post('/api/tasks/:id/run', async (req, res) => {
+  const result = await executeTask(req.params.id);
+  if (!result.success) return res.status(404).json({ error: result.error });
+  res.json(result);
 });
 
 app.delete('/api/tasks/:id', (req, res) => {

@@ -657,7 +657,8 @@ function API(name = "untitled", debug = false) {
       this.debug = debug;
       this.env = env;
       this.http = HTTP();
-      this.node = env.isNode ? { fs: require("fs") } : null;
+      this.node = env.isNode ? { fs: require("fs"), path: require("path") } : null;
+      this.baseDir = env.isNode ? __dirname : "";
       this.root = {};
       this.cache = {};
       this.initCache();
@@ -681,12 +682,18 @@ function API(name = "untitled", debug = false) {
     }
 
     readJsonFile(file) {
-      if (!this.node.fs.existsSync(file)) {
-        this.node.fs.writeFileSync(file, JSON.stringify({}, null, 2), { flag: "wx" });
+      const filePath = this.nodeFile(file);
+
+      if (!this.node.fs.existsSync(filePath)) {
+        this.node.fs.writeFileSync(filePath, JSON.stringify({}, null, 2), { flag: "wx" });
         return {};
       }
 
-      return safeJsonParse(this.node.fs.readFileSync(file, "utf8"), {});
+      return safeJsonParse(this.node.fs.readFileSync(filePath, "utf8"), {});
+    }
+
+    nodeFile(file) {
+      return this.node.path.join(this.baseDir, file);
     }
 
     persistCache() {
@@ -697,8 +704,8 @@ function API(name = "untitled", debug = false) {
       } else if (env.isLoon || env.isSurge) {
         $persistentStore.write(body, this.name);
       } else if (env.isNode) {
-        this.node.fs.writeFileSync(`${this.name}.json`, body);
-        this.node.fs.writeFileSync("root.json", JSON.stringify(this.root, null, 2));
+        this.node.fs.writeFileSync(this.nodeFile(`${this.name}.json`), body);
+        this.node.fs.writeFileSync(this.nodeFile("root.json"), JSON.stringify(this.root, null, 2));
       }
     }
 

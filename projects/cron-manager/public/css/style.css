@@ -459,6 +459,38 @@ body {
   border-color: rgba(255, 107, 129, 0.3);
 }
 
+.btn-run {
+  background: var(--green-bg);
+  color: var(--green);
+  border: 1px solid transparent;
+}
+
+.btn-run:hover {
+  background: rgba(0, 214, 143, 0.2);
+  border-color: rgba(0, 214, 143, 0.3);
+}
+
+.btn-run:disabled {
+  opacity: 0.5;
+  cursor: not-allowed;
+}
+
+.btn-run .spinner {
+  width: 12px;
+  height: 12px;
+  border: 2px solid var(--green);
+  border-top-color: transparent;
+  border-radius: 50%;
+  animation: spin 0.6s linear infinite;
+  display: inline-block;
+  vertical-align: middle;
+  margin-right: 4px;
+}
+
+@keyframes spin {
+  to { transform: rotate(360deg); }
+}
+
 /* ===== Empty State ===== */
 .empty-state {
   text-align: center;
